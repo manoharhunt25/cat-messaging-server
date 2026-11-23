@@ -1,0 +1,12 @@
+# Dependencies
+node_modules/
+
+# Secrets: database connection string and JWT secret
+config/.enviro
+.env
+.env.*
+
+# OS / editor files
+.DS_Store
+Thumbs.db
+*.log

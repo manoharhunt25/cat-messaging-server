@@ -1,0 +1,11 @@
+# Copy this file to config/.enviro and fill in your own values.
+# config/.enviro is ignored by git; never commit real credentials.
+
+# MongoDB Atlas connection string (Atlas > Database > Connect > Drivers)
+MONGO_URI=mongodb+srv://<username>:<password>@<cluster-host>/<database-name>?retryWrites=true&w=majority
+
+# Any long random string, used to sign login tokens
+JWT_SECRET=replace-with-a-long-random-string
+
+# Optional; defaults to 4000
+# PORT=4000
