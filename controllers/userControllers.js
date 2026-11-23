@@ -2,9 +2,16 @@ const asyncHandler = require("express-async-handler");
 const generateToken = require("../config/generateToken");
 const User = require("../models/userModel");
 
+// Only accept plain strings, so request bodies can't smuggle MongoDB query
+// operators (for example {"$ne": null}) into database lookups.
+const isText = (v) => typeof v === "string" && v.trim() !== "";
+
+// Escape user input before using it inside a regular expression.
+const escapeRegex = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
 const registerUser = asyncHandler(async (req,res) => {
     const {name,email,password} = req.body;
-    if(!name || !email || !password){
+    if(!isText(name) || !isText(email) || !isText(password)){
         res.status(400);
         throw new Error("Please enter all the fields");
     }
@@ -36,11 +43,14 @@ const registerUser = asyncHandler(async (req,res) => {
 
 const authUser = asyncHandler(async(req,res)=> {
     const {email,password} = req.body;
-    
-    
+
+    if(!isText(email) || !isText(password)){
+        res.status(400);
+        throw new Error("Email and password are required");
+    }
+
     const user = await User.findOne({email});
     if(user && (await user.matchPassword(password))){
-        console.log("User found:", user.name);
         res.json({
             _id: user._id,
             name:user.name,
@@ -55,17 +65,18 @@ const authUser = asyncHandler(async(req,res)=> {
     }
 });
 
-// /api/user
+// @desc    Search users by name (excludes the caller)
+// @route   GET /api/user?search=
+// @access  Protected
 const allUsers = asyncHandler(async (req, res) => {
-  const keyword = req.query.search
-    ? {
-        $or: [
-          { name: { $regex: req.query.search, $options: "i" } },
-          //{ email: { $regex: req.query.search, $options: "i" } },
-        ],
-      }
-    : {};
-const users = await User.find(keyword) .find({ _id: { $ne: req.user._id } });
+  const search = typeof req.query.search === "string" ? req.query.search.trim() : "";
+  const filter = { _id: { $ne: req.user._id } };
+  if (search) {
+    filter.name = { $regex: escapeRegex(search), $options: "i" };
+  }
+
+  // Only return public profile fields: never the password hash
+  const users = await User.find(filter).select("name email pic").limit(50);
   res.send(users);
 });
 

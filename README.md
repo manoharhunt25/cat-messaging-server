@@ -58,33 +58,35 @@ You should see `Server started on port 4000`, then `MongoDB Connected: …`. Vis
 
 Base URL: `http://localhost:4000`. Request and response bodies are JSON.
 
-Routes marked 🔒 need an `Authorization: Bearer <token>` header with the token from register or login. Missing or invalid tokens get `401`.
+Routes marked 🔒 need an `Authorization: Bearer <token>` header with the token from register or login. Missing or invalid tokens, or a token for a deleted account, get `401`. Malformed IDs get `400`, a missing chat or user gets `404`, and actions you aren't allowed to take get `403`.
 
 ### Users: `/api/user`
 
 | Method | Path | Auth | Body / query | Description |
 |---|---|---|---|---|
-| `POST` | `/api/user` | | `{ name, email, password }` | Register. Returns the user and a `token`. `400` if fields are missing or the email is taken. |
-| `POST` | `/api/user/login` | | `{ email, password }` | Log in. Returns the user and a `token`. `401` for wrong credentials. |
-| `GET` | `/api/user?search=<text>` | 🔒 | | Case-insensitive search by name. Excludes the caller. |
+| `POST` | `/api/user` | | `{ name, email, password }` | Register. Returns the user and a `token`. `400` if fields are missing or not text, or the email is taken. |
+| `POST` | `/api/user/login` | | `{ email, password }` | Log in. Returns the user and a `token`. `400` if fields are missing or not text, `401` for wrong credentials. |
+| `GET` | `/api/user?search=<text>` | 🔒 | | Case-insensitive search by name, matching the text literally. Excludes the caller and returns at most 50 users, with `_id`, `name`, `email` and `pic` only. |
 
 ### Chats: `/api/chat`
 
 | Method | Path | Auth | Body | Description |
 |---|---|---|---|---|
-| `POST` | `/api/chat` | 🔒 | `{ userId }` | Opens the one-to-one chat with that user, creating it if needed. |
+| `POST` | `/api/chat` | 🔒 | `{ userId }` | Opens the one-to-one chat with that user, creating it if needed. `404` if the user doesn't exist; you can't chat with yourself. |
 | `GET` | `/api/chat` | 🔒 | | All chats the caller belongs to, most recently updated first, with members, group admin and latest message filled in. |
-| `POST` | `/api/chat/group` | 🔒 | `{ name, users }` | Creates a group. `users` is a **JSON string** array of user IDs and must hold at least 2; the caller is added and becomes admin. |
-| `PUT` | `/api/chat/rename` | 🔒 | `{ chatId, chatName }` | Renames a group. |
-| `PUT` | `/api/chat/groupadd` | 🔒 | `{ chatId, userId }` | Adds a member. |
-| `PUT` | `/api/chat/groupremove` | 🔒 | `{ chatId, userId }` | Removes a member (also used to leave). |
+| `POST` | `/api/chat/group` | 🔒 | `{ name, users }` | Creates a group. `users` is a **JSON string** array of user IDs; duplicates and the caller are ignored, and at least 2 other existing users are required. The caller is added and becomes admin. |
+| `PUT` | `/api/chat/rename` | 🔒 | `{ chatId, chatName }` | Renames a group. **Admin only.** |
+| `PUT` | `/api/chat/groupadd` | 🔒 | `{ chatId, userId }` | Adds a member. **Admin only**; the user must exist and not already be in the group. |
+| `PUT` | `/api/chat/groupremove` | 🔒 | `{ chatId, userId }` | Removes a member. **The admin can remove anyone; any member can remove themselves** (leave). If the admin leaves, the next member becomes admin. |
+
+Group actions require the caller to be a member of the group; non-members get `403`.
 
 ### Messages: `/api/message`
 
 | Method | Path | Auth | Body | Description |
 |---|---|---|---|---|
-| `POST` | `/api/message` | 🔒 | `{ content, chatId }` | Sends a message and updates the chat's latest message. Returns the message with sender and chat filled in. |
-| `GET` | `/api/message/:chatId` | 🔒 | | All messages in a chat, in the order they were saved. |
+| `POST` | `/api/message` | 🔒 | `{ content, chatId }` | Sends a message and updates the chat's latest message. Returns the message with sender and chat filled in. **Members only.** |
+| `GET` | `/api/message/:chatId` | 🔒 | | All messages in a chat, in the order they were saved. **Members only.** |
 
 ### Errors
 
@@ -94,11 +96,19 @@ Errors return JSON: `{ "message": "...", "stack": "..." }`. `stack` is `null` wh
 
 The Socket.IO server runs on the same port. It only accepts connections from **`http://localhost:3000`**: change `origin` in `server.js` when you deploy the client somewhere else.
 
+**Connections must log in** with the same JWT the REST API uses:
+
+```js
+const socket = io("http://localhost:4000", { auth: { token } });
+```
+
+Connections without a valid token are refused with `Not authorized`. The server identifies the user from the token, and never from anything the client sends in an event.
+
 | Direction | Event | Payload | Purpose |
 |---|---|---|---|
-| client → server | `setup` | user object | Joins a private room named after the user's ID. The server replies with `connected`. |
-| client → server | `join chat` | chat ID | Joins the room for an open chat. |
-| client → server | `new message` | message (as returned by `POST /api/message`) | Forwards the message to every other member's room. |
+| client → server | `setup` | (ignored) | Joins the user's private room, named after their verified ID. The server replies with `connected`. |
+| client → server | `join chat` | chat ID | Joins the room for a chat. Ignored unless the user is a member. |
+| client → server | `new message` | message (as returned by `POST /api/message`) | Relays a just-sent message to the other members. Only its `_id` is used: the server reloads it from the database, checks the sender is this user, and delivers it to the chat's real members. |
 | server → client | `message recieved` | message | A new message for this user. The spelling matches the client code. |
 
 ## Data model
@@ -132,8 +142,16 @@ data/data.js              Sample data, not used by the server
 ### Node.js 25 and later
 Node 25 removed `buffer.SlowBuffer`. `jsonwebtoken` still depends on `buffer-equal-constant-time` (through `jws` and `jwa`), which reads it when loaded, so the server crashed on startup. [`config/nodeCompat.js`](config/nodeCompat.js) restores an alias before anything loads `jsonwebtoken`. It does nothing on older Node versions, and can be deleted once that dependency chain is updated.
 
+### Security
+The server enforces its rules itself, without relying on the client:
+- Only group admins can rename a group or add and remove members; anyone can leave.
+- Only members can read or send messages in a chat.
+- Socket.IO connections need a valid JWT, and users can only receive their own messages and relay messages they sent.
+- User search never returns password hashes, and search text is escaped before it reaches a database regex.
+- Login and register only accept plain text fields, which blocks MongoDB query-operator injection.
+
 ### Known limitations
-- **Group admin rights are not enforced by the server.** Rename, add and remove only check that the caller is logged in. The client restricts these actions to the group admin, but a direct API call can bypass that. Add admin checks in `controllers/chatControllers.js` before using this in production.
-- **Group membership isn't checked for messages.** Any logged-in user who knows a chat's ID can read or post to it.
 - **CORS:** the REST API accepts requests from any origin, while Socket.IO accepts only `http://localhost:3000`. Tighten both for production.
+- **No rate limiting** on login or registration.
+- **Tokens last 30 days and can't be revoked**; logging out only removes the token in the browser.
 - There are no automated tests for the server yet.

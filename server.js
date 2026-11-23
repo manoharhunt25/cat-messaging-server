@@ -11,7 +11,11 @@ const chatRoutes = require("./Routes/chatRoutes");
 const messageRoutes = require("./Routes/messageRoutes");
 const { notFound, errorHandler } = require("./middleware/errorMiddleware");
 const cors = require("cors");
-
+const jwt = require("jsonwebtoken");
+const mongoose = require("mongoose");
+const User = require("./models/userModel");
+const Chat = require("./models/chatModel");
+const Message = require("./models/messageModel");
 
 const app = express();
 dotenv.config();
@@ -42,34 +46,65 @@ const io = require("socket.io")(server, {
   },
 });
 
-io.on("connection", (socket) => {
-  console.log("connected to socket.io");
+// Every socket must present the same JWT the REST API uses:
+//   io(url, { auth: { token } })
+// The verified user id is stored on the socket and used for everything below,
+// so a client can't act as, or listen in on, another user.
+io.use(async (socket, next) => {
+  try {
+    const token = socket.handshake.auth && socket.handshake.auth.token;
+    const { id } = jwt.verify(token, process.env.JWT_SECRET);
+    const user = await User.exists({ _id: id });
+    if (!user) throw new Error("user not found");
+    socket.userId = String(id);
+    next();
+  } catch {
+    next(new Error("Not authorized"));
+  }
+});
 
-  socket.on("setup", (userData) => {
-    socket.join(userData._id);
-    console.log(userData._id);
+io.on("connection", (socket) => {
+  // Each user listens on a private room named after their own (verified) id.
+  // The payload is ignored on purpose.
+  socket.on("setup", () => {
+    socket.join(socket.userId);
     socket.emit("connected");
   });
-  socket.on("join chat", (room) => {
-    socket.join(room);
-    console.log("User Joined Room:" + room);
+
+  // Only members may join a chat's room
+  socket.on("join chat", async (chatId) => {
+    try {
+      if (!mongoose.isValidObjectId(chatId)) return;
+      const isMember = await Chat.exists({ _id: chatId, users: socket.userId });
+      if (isMember) socket.join(String(chatId));
+    } catch (error) {
+      console.error("join chat failed:", error.message);
+    }
   });
 
-  socket.on("new message", (newMessageRecieved) => {
-    var chat = newMessageRecieved.chat;
+  // Relay a message the client has just saved via POST /api/message.
+  // The payload is not trusted: the message is reloaded from the database,
+  // must have been sent by this socket's user, and is delivered only to
+  // that chat's real members.
+  socket.on("new message", async (payload) => {
+    try {
+      const messageId = payload && payload._id;
+      if (!mongoose.isValidObjectId(messageId)) return;
 
-    if (!chat.users) return console.log("chat.users not defined");
+      const message = await Message.findById(messageId)
+        .populate("sender", "name pic email")
+        .populate({ path: "chat", populate: { path: "users", select: "name pic email" } });
 
-    chat.users.forEach((user) => {
-      if (user._id == newMessageRecieved.sender._id) return;
+      if (!message || !message.chat) return;
+      if (String(message.sender._id) !== socket.userId) return;
 
-      socket.in(user._id).emit("message recieved", newMessageRecieved);
-    });
-
-    
+      message.chat.users.forEach((member) => {
+        const memberId = String(member._id);
+        if (memberId === socket.userId) return;
+        socket.in(memberId).emit("message recieved", message);
+      });
+    } catch (error) {
+      console.error("new message relay failed:", error.message);
+    }
   });
-   socket.off("setup", () => {
-    console.log("USER DISCONNECTED");
-    socket.leave(userData._id);
-   });
 });
